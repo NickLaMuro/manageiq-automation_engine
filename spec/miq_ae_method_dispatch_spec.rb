@@ -91,22 +91,30 @@ describe "MiqAeMethodDispatch" do
                                   'ae_instances' => ae_instances))
   end
 
-  it "long running method", :skip => "Fails sporadically because 2 seconds is not long enough" do
-    File.delete(@pidfile) if File.exist?(@pidfile)
-    setup_model(rip_van_winkle_script)
-    # Set the timeout to 2 seconds so we can terminate
-    # unresponsive method
-    send_ae_request_via_queue(@automate_args, 2)
-    status, _msg, _ws = deliver_ae_request_from_queue
-    expect(status).to eql 'timeout'
-    pid = File.read(@pidfile).to_i
-    expect { Process.getpgid(pid) }.to raise_error(Errno::ESRCH)
-  end
+#   it "long running method", :skip => "Fails sporadically because 2 seconds is not long enough" do
+#     File.delete(@pidfile) if File.exist?(@pidfile)
+#     setup_model(rip_van_winkle_script)
+#     # Set the timeout to 2 seconds so we can terminate
+#     # unresponsive method
+#     send_ae_request_via_queue(@automate_args, 2)
+#     status, _msg, _ws = deliver_ae_request_from_queue
+#     expect(status).to eql 'timeout'
+#     pid = File.read(@pidfile).to_i
+#     expect { Process.getpgid(pid) }.to raise_error(Errno::ESRCH)
+#   end
 
   it "run method that writes to stderr and stdout" do
     setup_model(std_script)
-    send_ae_request_via_queue(@automate_args)
-    _, _, ws = deliver_ae_request_from_queue
+    # q = send_ae_request_via_queue(@automate_args)
+    _status, _two, ws = MiqAeEngine.deliver @automate_args
+    # _status, _two, ws = deliver_ae_request_from_queue
+    # q.reload
+    # if _status == MiqQueue::STATUS_ERROR
+    #   puts "#{q.last_exception.class.name}: #{q.last_exception.message}"
+    #   puts q.last_exception.backtrace
+    # end
+    puts; puts; puts _status; puts _two;
+    puts ws.inspect; puts
     pid = File.read(@pidfile).to_i
     expect(ws.root['method_pid']).to eql pid
   end

@@ -1,9 +1,12 @@
 module MiqAeMethodService
   class MiqAeServiceFront
-    include DRbUndumped
     attr_accessor :workspace
     def initialize(workspace)
       @workspace = workspace
+    end
+
+    def self.connect_and_find(url, api_token, service_id)
+
     end
 
     def find(id)

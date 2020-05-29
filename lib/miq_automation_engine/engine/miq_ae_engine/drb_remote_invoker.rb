@@ -1,7 +1,7 @@
 require 'drb'
 module MiqAeEngine
   class DrbRemoteInvoker
-    attr_accessor :drb_server, :num_methods
+    attr_accessor :api_token, :num_methods, :service_front
 
     def initialize(workspace)
       @workspace = workspace
@@ -9,12 +9,17 @@ module MiqAeEngine
     end
 
     def with_server(inputs, bodies, method_name, script_info)
+puts "DrbRemoteInvoker.with_server("
+puts "  inputs=#{inputs.inspect},"
+puts "  bodies=#{bodies.inspect},"
+puts "  method_name=#{method_name.inspect},"
+puts "  script_info=#{script_info.inspect})"
       setup if num_methods.zero?
       self.num_methods += 1
       svc = MiqAeMethodService::MiqAeService.new(@workspace, inputs)
       yield build_method_content(bodies, method_name, svc.object_id, script_info)
     ensure
-      svc.destroy # Reset inputs to empty to avoid storing object references
+      svc.destroy if svc# Reset inputs to empty to avoid storing object references
       self.num_methods -= 1
       teardown if num_methods.zero?
     end
@@ -24,50 +29,24 @@ module MiqAeEngine
     # See https://github.com/ruby/ruby/blob/trunk/lib/drb/drb.rb#L1658
     # Previously we had used DRb.front but that gets compromised when multiple
     # DRb servers are running in the same process.
-    def self.workspace
-      if Thread.current['DRb'] && Thread.current['DRb']['server']
-        Thread.current['DRb']['server'].front.workspace
-      end
-    end
+    # def self.workspace
+    #   if Thread.current['DRb'] && Thread.current['DRb']['server']
+    #     Thread.current['DRb']['server'].front.workspace
+    #   end
+    # end
 
     private
 
     # invocation
 
     def setup
-      require 'drb/timeridconv'
-      global_id_conv = DRb::TimerIdConv.new(drb_cache_timeout)
-      drb_front = MiqAeMethodService::MiqAeServiceFront.new(@workspace)
+      user = User.first
 
-      require 'tmpdir'
-      Dir::Tmpname.create("automation_engine", nil) do |path|
-        self.drb_server = DRb.start_service("drbunix://#{path}", drb_front, :idconv => global_id_conv)
-        FileUtils.chmod(0o700, path)
-      end
+      self.service_front = MiqAeMethodService::MiqAeServiceFront.new(@workspace)
+      self.api_token     = Api::UserTokenService.new.generate_token(user.userid, 'api')
     end
 
     def teardown
-      global_id_conv = drb_server.config[:idconv]
-      drb_server.stop_service
-      self.drb_server = nil
-
-      # This hack was done to prevent ruby from leaking the
-      # TimerIdConv thread.
-      # https://bugs.ruby-lang.org/issues/12342 (has been fixed in ruby 2.4.0 preview 1)
-      # also fixed in ruby_2_3 branch for the 2.3.2 release: https://github.com/ruby/ruby/commit/c20b07d5357d7cb73226b149431a658cde54a697
-      if RUBY_VERSION <= "2.3.1"
-        thread = global_id_conv
-                 .try(:instance_variable_get, '@holder')
-                 .try(:instance_variable_get, '@keeper')
-        return unless thread
-
-        thread.kill
-        Thread.pass while thread.alive?
-      end
-    end
-
-    def drb_cache_timeout
-      1.hour
     end
 
     # code building
@@ -84,11 +63,12 @@ module MiqAeEngine
     def dynamic_preamble(method_name, miq_ae_service_token, script_info)
       script_info_yaml = script_info.to_yaml
       <<-RUBY.chomp
-MIQ_URI = '#{drb_server.uri}'
+MIQ_URI = '#{'localhost:3000/api'}' # FIXME
 MIQ_ID = #{miq_ae_service_token}
+MIQ_API_TOKEN = #{api_token.inspect}
 RUBY_METHOD_NAME = '#{method_name}'
 SCRIPT_INFO_YAML = '#{script_info_yaml}'
-RUBY_METHOD_PREAMBLE_LINES = #{RUBY_METHOD_PREAMBLE_LINES + 5 + script_info_yaml.lines.count}
+RUBY_METHOD_PREAMBLE_LINES = #{RUBY_METHOD_PREAMBLE_LINES + 6 + script_info_yaml.lines.count}
 RUBY
     end
 
@@ -100,11 +80,11 @@ begin
   require 'date'
   require 'rubygems'
   $:.unshift("#{Gem.loaded_specs['activesupport'].full_gem_path}/lib")
+  require '#{MiqAeMethodService::MiqAeServiceFront.instance_method(:find).source_location.first}'
   require 'active_support/all'
   require 'socket'
   Socket.do_not_reverse_lookup = true  # turn off reverse DNS resolution
 
-  require 'drb'
   require 'yaml'
 
   Time.zone = 'UTC'
@@ -115,24 +95,7 @@ begin
   MIQ_STOP  = 8
   MIQ_ABORT = 16
 
-  DRbObject.send(:undef_method, :inspect)
-  DRbObject.send(:undef_method, :id) if DRbObject.respond_to?(:id)
-  # undefine Object#display which would be called over service#display
-  DRbObject.send(:undef_method, :display)
-
-  # DRb.start_service with no URI can attempt to resolve your local hostname[1], which:
-  #   * is slower than just telling it to use a local address/socket
-  #   * could be wrong and in some cases, it can be a remote IP to a DNS assistance program
-  # [1] https://github.com/ruby/ruby/blob/v2_6_5/lib/drb/drb.rb#L879-L884
-  require 'tmpdir'
-  Dir::Tmpname.create("automation_client", nil) do |path|
-    DRb.start_service("drbunix://\#{path}")
-    FileUtils.chmod(0o700, path)
-  end
-
-  $evmdrb = DRbObject.new_with_uri(MIQ_URI)
-  raise AutomateMethodException,"Cannot create DRbObject for uri=\#{MIQ_URI}" if $evmdrb.nil?
-  $evm = $evmdrb.find(MIQ_ID)
+  $evm = MiqAeMethodService::MiqAeServiceFront.connect_and_find(MIQ_URI, MIQ_API_TOKEN, MIQ_ID)
   raise AutomateMethodException,"Cannot find Service for id=\#{MIQ_ID} and uri=\#{MIQ_URI}" if $evm.nil?
   MIQ_ARGS = $evm.inputs
 
